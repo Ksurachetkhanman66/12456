@@ -159,4 +159,58 @@ router.delete('/:dramaId', async (req, res) => {
   }
 });
 
+router.post('/', auth, async (req, res) => {
+  const userId = req.user.id;
+  const { dramaId } = req.body;
+
+  await db.query(
+    'INSERT IGNORE INTO favorites (user_id, drama_id) VALUES (?, ?)',
+    [userId, dramaId]
+  );
+
+  res.json({ success: true });
+});
+
+router.delete('/:dramaId', auth, async (req, res) => {
+  const userId = req.user.id;
+  const { dramaId } = req.params;
+
+  await db.query(
+    'DELETE FROM favorites WHERE user_id = ? AND drama_id = ?',
+    [userId, dramaId]
+  );
+
+  res.json({ success: true });
+});
+
+router.get('/check/:dramaId', auth, async (req, res) => {
+  const userId = req.user.id;
+  const { dramaId } = req.params;
+
+  const [rows] = await db.query(
+    'SELECT id FROM favorites WHERE user_id = ? AND drama_id = ?',
+    [userId, dramaId]
+  );
+
+  res.json({
+    success: true,
+    data: { isFavorite: rows.length > 0 }
+  });
+});
+
+router.get('/', auth, async (req, res) => {
+  const userId = req.user.id;
+
+  const [rows] = await db.query(
+    `SELECT f.drama_id, d.*
+     FROM favorites f
+     JOIN dramas d ON d.id = f.drama_id
+     WHERE f.user_id = ?`,
+    [userId]
+  );
+
+  res.json({ success: true, data: rows });
+});
+
+
 module.exports = router;
