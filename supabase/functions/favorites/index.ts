@@ -1,0 +1,176 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+serve(async (req: Request) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  try {
+    // Get auth header for user authentication
+    const authHeader = req.headers.get('Authorization');
+    
+    // Create Supabase client with service role for database operations
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    // Create client with user's auth token for getting user info
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader || '' } } }
+    );
+
+    // Get user from auth
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+    if (userError || !user) {
+      console.error('Auth error:', userError?.message || 'No user found');
+      return new Response(
+        JSON.stringify({ success: false, error: 'Unauthorized - Please log in' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log(`User authenticated: ${user.id}`);
+
+    const url = new URL(req.url);
+    
+    // Parse body for POST requests (supabase.functions.invoke always sends POST)
+    let bodyParams: Record<string, string> = {};
+    if (req.method === 'POST') {
+      try {
+        bodyParams = await req.json();
+      } catch {
+        bodyParams = {};
+      }
+    }
+
+    // Determine action based on body.action or method
+    const action = bodyParams.action || req.method;
+    const dramaId = url.searchParams.get('drama_id') || bodyParams.drama_id;
+
+    console.log(`Action: ${action}, Drama ID: ${dramaId}`);
+
+    // CHECK - Check if specific drama is favorited
+    if (action === 'CHECK' || (action === 'GET' && dramaId)) {
+      if (!dramaId) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'drama_id is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('favorites')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('drama_id', dramaId)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      return new Response(
+        JSON.stringify({ success: true, isFavorite: !!data }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // LIST - Get all favorites with drama details
+    if (action === 'GET' || action === 'LIST') {
+      const { data, error } = await supabaseAdmin
+        .from('favorites')
+        .select('id, drama_id, created_at, dramas(*)')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      console.log(`Fetched ${data?.length || 0} favorites for user ${user.id}`);
+
+      return new Response(
+        JSON.stringify({ success: true, data, total: data?.length || 0 }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // ADD - Add to favorites
+    if (action === 'POST' || action === 'ADD') {
+      if (!dramaId) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'drama_id is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('favorites')
+        .insert({ user_id: user.id, drama_id: dramaId })
+        .select()
+        .single();
+
+      if (error) {
+        // Handle duplicate error
+        if (error.code === '23505') {
+          return new Response(
+            JSON.stringify({ success: false, error: 'Already in favorites' }),
+            { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        throw error;
+      }
+
+      console.log(`Added favorite ${data.id} for user ${user.id}`);
+
+      return new Response(
+        JSON.stringify({ success: true, data }),
+        { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // REMOVE - Remove from favorites
+    if (action === 'DELETE' || action === 'REMOVE') {
+      if (!dramaId) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'drama_id is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { error } = await supabaseAdmin
+        .from('favorites')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('drama_id', dramaId);
+
+      if (error) throw error;
+
+      console.log(`Removed favorite for drama ${dramaId} for user ${user.id}`);
+
+      return new Response(
+        JSON.stringify({ success: true }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({ success: false, error: 'Invalid action' }),
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    console.error('Edge function error:', errorMessage);
+    return new Response(
+      JSON.stringify({ success: false, error: errorMessage }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+});
